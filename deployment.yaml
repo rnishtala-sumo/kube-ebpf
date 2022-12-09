@@ -1,0 +1,148 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+ name: monitoring
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-ebpf
+  namespace: monitoring
+  labels:
+    app: kube-ebpf
+spec:
+  selector:
+    matchLabels:
+      name: kube-ebpf
+  template:
+    metadata:
+      labels:
+        name: kube-ebpf
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: '/metrics'
+        prometheus.io/port: '8000'
+    spec:
+      containers:
+        - name: kube-ebpf
+          image: ghcr.io/rnishtala-sumo/kube-ebpf:latest
+          ports:
+            - containerPort: 8000
+              name: metrics
+          imagePullPolicy: Always
+          resources:
+            requests:
+              ephemeral-storage: "2Gi"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+          volumeMounts:
+            - name: modules-dir
+              mountPath: /lib/modules
+              readOnly: false
+            - name: linux-headers-generated
+              mountPath: /usr/src/
+              readOnly: false
+            - name: debug
+              mountPath: /sys/kernel/debug
+              readOnly: false
+      hostNetwork: true
+      hostPID: true
+      serviceAccountName: kube-ebpf
+      volumes:
+        - name: lsb-release
+          hostPath:
+            path: /etc/lsb-release
+        - name: os-release
+          hostPath:
+            path: /etc/os-release
+        - name: modules-dir
+          hostPath:
+            path: /lib/modules
+        - name: linux-headers-generated
+          hostPath:
+            path: /var/cache/linux-headers/generated
+        - name: boot-host
+          hostPath:
+            path: /
+        - name: modules-host
+          hostPath:
+            path: /lib/modules
+        - name: debug
+          hostPath:
+            path: /sys/kernel/debug
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-ebpf
+rules:
+  - apiGroups: [""]
+    resources:
+      - services
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-ebpf
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-ebpf
+subjects:
+  - kind: ServiceAccount
+    name: kube-ebpf
+    namespace: monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-ebpf
+  namespace: monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-ebpf
+  namespace: monitoring
+  labels:
+    app: kube-ebpf
+spec:
+  selector:
+    name: kube-ebpf
+  ports:
+    - name: "8000"
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-ebpf
+  namespace: monitoring
+  labels:
+    release: sumo  # ensure this matches the `release` label on your Prometheus pod
+spec:
+  selector:
+    matchLabels:
+      app: kube-ebpf
+  endpoints:
+  - targetPort: "8000"  # Same as service's port name
+  - interval: 30s
+  - path: /metrics
